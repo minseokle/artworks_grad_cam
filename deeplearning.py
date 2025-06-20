@@ -12,6 +12,18 @@ import numpy as np
 import cv2
 import matplotlib.pyplot as plt
 from skimage.transform import resize
+import random
+
+import wandb # [WANDB] wandb 임포트
+import kagglehub
+
+CURRENT_FOLDER = os.path.abspath(os.path.dirname(__file__))
+
+data_dir=kagglehub.dataset_download("orvile/brain-cancer-mri-dataset")
+print(data_dir)
+    
+data_dir = os.path.join(data_dir,'Brain_Cancer raw MRI data/Brain_Cancer')
+
 
 # 1. 기본 설정
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -96,9 +108,7 @@ val_transforms = transforms.Compose([
     transforms.Normalize(mean=IMG_MEAN, std=IMG_STD)
 ])
 
-
-# 4. 데이터 로딩 및 준비
-data_dir = '/root/workspace/2/Brain_Cancer raw MRI data/Brain_Cancer' 
+#4. 데이터 준비
 full_dataset = datasets.ImageFolder(root=data_dir, transform=train_transforms)
 class_names = full_dataset.classes
 print(f"발견된 클래스: {class_names}")
@@ -157,6 +167,12 @@ def train_model(model, train_loader, val_loader, epochs=100, model_name="best_mo
         accuracy = 100 * correct / total
         print(f"에포크 [{epoch+1}/{epochs}], 학습 손실: {running_loss/len(train_loader):.4f}, 검증 정확도: {accuracy:.2f}%")
 
+        wandb.log({
+            "epoch": epoch + 1,
+            "train_loss": running_loss/len(train_loader),
+            "val_loss": val_loss,
+            "accuracy": accuracy
+        })
         # --- 모델 저장 로직 (두 가지 방식 모두 사용) ---
 
         # 1. 최고 성능 모델 저장 (기존 방식)
@@ -179,6 +195,16 @@ def train_model(model, train_loader, val_loader, epochs=100, model_name="best_mo
 
 
     print(f"학습 완료. 최고 검증 정확도: {best_val_accuracy:.2f}%")
+    # [WANDB] 최고 성능 모델을 Artifact로 저장
+    best_model_artifact = wandb.Artifact(
+        name="best_brain_tumor_model",
+        type="model",
+        description="가장 높은 검증 정확도를 보인 모델",
+        metadata={"best_accuracy": best_val_accuracy}
+    )
+    best_model_artifact.add_file("best_model.pt")
+    wandb.run.log_artifact(best_model_artifact)
+    print("최고 성능 모델을 wandb Artifact로 저장했습니다.")
     return model
 
 
@@ -225,33 +251,53 @@ def visualize_result(img_tensor, cam, predicted_class, actual_class):
     plt.show()
 
 
-# 7. 전체 로직 실행
-# 모델 생성
+# [WANDB] config 객체를 통해 하이퍼파라미터 접근
+config = wandb.config
+
+# DataLoader 생성
+train_loader = DataLoader(train_dataset, batch_size=config.batch_size, shuffle=True, num_workers=2)
+val_loader = DataLoader(val_dataset, batch_size=config.batch_size, shuffle=False, num_workers=2)
+
+# 모델 생성 및 학습
 model = AttentionCNN(num_classes=len(class_names))
+train_model(model, train_loader, val_loader, config)
 
-# 모델 학습
-trained_model = train_model(model, train_loader, val_loader, epochs=10000)
+# [WANDB] 시각화 결과 로깅
+print("\n--- 검증 데이터셋의 샘플에 대한 결과 시각화 및 wandb 로깅 ---")
+# 시각화할 이미지 인덱스 선택
+indices_to_visualize = random.sample(range(len(val_dataset)), 5) # 5개 랜덤 샘플
+wandb_images = []
 
-# Grad-CAM 시각화를 위한 샘플 이미지 선택
-sample_img, sample_label_idx = val_dataset[10] # 검증 데이터셋에서 11번째 이미지 선택
-actual_class_name = class_names[sample_label_idx]
+for index in indices_to_visualize:
+    sample_img, sample_label_idx = val_dataset[index]
+    actual_class_name = class_names[sample_label_idx]
+    
+    # Grad-CAM 생성 로직 ...
+    input_tensor = sample_img.unsqueeze(0).to(device)
+    model.eval() # 모델을 평가 모드로
+    with torch.no_grad():
+        outputs = model(input_tensor); _, predicted_idx_tensor = torch.max(outputs, 1)
+        predicted_idx = predicted_idx_tensor.item(); predicted_class_name = class_names[predicted_idx]
+    
+    target_layer = model.features[-2]
+    grad_cam = GradCAM(model, target_layer)
+    cam = grad_cam(input_tensor, index=predicted_idx_tensor)
+    
+    # 로깅할 이미지 생성
+    # visualize_result 함수를 약간 수정하여 plt 객체를 반환하게 하거나, 여기서 직접 생성
+    inv_normalize = transforms.Normalize(mean=[-m/s for m, s in zip(IMG_MEAN, IMG_STD)], std=[1/s for s in IMG_STD])
+    img_for_viz = inv_normalize(sample_img)
+    img = img_for_viz.squeeze().permute(1, 2, 0).cpu().numpy(); img = np.clip(img, 0, 1)
+    heatmap = cv2.applyColorMap(np.uint8(255 * cam), cv2.COLORMAP_JET); heatmap = cv2.cvtColor(heatmap, cv2.COLOR_BGR2RGB)
+    superimposed_img = np.uint8(heatmap * 0.4 + np.uint8(img * 255) * 0.6)
+    
+    title = f"Idx:{index} | Actual:{actual_class_name} | Pred:{predicted_class_name}"
+    
+    wandb_images.append(wandb.Image(superimposed_img, caption=title))
 
-# 모델 예측
-input_tensor = sample_img.unsqueeze(0).to(device)
-trained_model.eval()
-with torch.no_grad():
-    outputs = trained_model(input_tensor)
-    _, predicted_idx_tensor = torch.max(outputs, 1)
-    predicted_idx = predicted_idx_tensor.item()
-    predicted_class_name = class_names[predicted_idx]
+# [WANDB] 준비된 모든 이미지를 한번에 로깅
+wandb.log({"predictions_and_gradcam": wandb_images})
+print("Grad-CAM 결과 이미지를 wandb에 로깅했습니다.")
 
-# Grad-CAM 생성 및 시각화
-target_layer = trained_model.features[-2] # 마지막 CBAM 블록
-grad_cam = GradCAM(trained_model, target_layer)
-cam = grad_cam(input_tensor, index=predicted_idx_tensor) # 모델이 예측한 클래스 기준으로 생성
-
-print("\n--- Grad-CAM 시각화 ---")
-print(f"선택된 샘플의 실제 클래스: {actual_class_name}")
-print(f"모델의 예측 클래스: {predicted_class_name}")
-
-visualize_result(sample_img, cam, predicted_class_name, actual_class_name)
+# [WANDB] 실험 종료
+wandb.finish()
