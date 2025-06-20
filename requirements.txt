@@ -3,3 +3,4 @@ kagglehub
 scikit-image
 matplotlib
 opencv-python
+tqdm
