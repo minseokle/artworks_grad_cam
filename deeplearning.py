@@ -78,67 +78,24 @@ class AttentionCNN(nn.Module):
         x = self.features(x); x = self.classifier(x)
         return x
 
-# 3. 데이터 변환(Transforms) 정의
-IMG_SIZE = 224
-IMG_MEAN = [0.485, 0.456, 0.406]
-IMG_STD = [0.229, 0.224, 0.225]
-
-# train_transforms = transforms.Compose([
-#     transforms.Resize((IMG_SIZE, IMG_SIZE)),
-#     transforms.RandomHorizontalFlip(p=0.5),
-#     transforms.RandomRotation(degrees=15),
-#     transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2),
-#     transforms.ToTensor(),
-#     transforms.Normalize(mean=IMG_MEAN, std=IMG_STD)
-# ])
-
-train_transforms = transforms.Compose([
-    transforms.Resize((IMG_SIZE, IMG_SIZE)),
-    transforms.RandomHorizontalFlip(p=0.5), # 좌우 반전
-    transforms.RandomRotation(degrees=20),    # 회전 각도 늘리기
-    transforms.RandomAffine(degrees=0, translate=(0.1, 0.1)), # 이미지 일부 이동
-    transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3), # 색상 변화 더 주기
-    transforms.ToTensor(),
-    transforms.Normalize(mean=IMG_MEAN, std=IMG_STD)
-])
-
-val_transforms = transforms.Compose([
-    transforms.Resize((IMG_SIZE, IMG_SIZE)),
-    transforms.ToTensor(),
-    transforms.Normalize(mean=IMG_MEAN, std=IMG_STD)
-])
-
-#4. 데이터 준비
-full_dataset = datasets.ImageFolder(root=data_dir, transform=train_transforms)
-class_names = full_dataset.classes
-print(f"발견된 클래스: {class_names}")
-
-train_size = int(0.8 * len(full_dataset))
-val_size = len(full_dataset) - train_size
-train_dataset, val_dataset = random_split(full_dataset, [train_size, val_size])
-val_dataset.dataset.transform = val_transforms # 검증셋에는 데이터 증강 없는 transform 적용
-
-print(f"총 데이터: {len(full_dataset)}개, 학습 데이터: {len(train_dataset)}개, 검증 데이터: {len(val_dataset)}개")
-
-BATCH_SIZE = 64
-train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=2)
-val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=2)
 
 
-# 5. 학습 및 평가 함수 정의
-# 5. 학습 및 평가 함수 정의 (주기적 저장 기능 추가)
-def train_model(model, train_loader, val_loader, epochs=100, model_name="best_model.pt"):
+
+# 4. 학습 및 평가 함수 (wandb 로깅 기능 추가)
+def train_model(model:torch.nn.Module, train_loader, val_loader, config):
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.parameters(), lr=0.0001)
+    optimizer = optim.Adam(model.parameters(), lr=config.learning_rate)
     model.to(device)
-    
-    best_val_accuracy = 0.0 # 최고 정확도 기록용
 
+    # [WANDB] 모델의 그래디언트와 파라미터 추적 시작
+    wandb.watch(model, criterion, log="all", log_freq=10)
+
+    best_val_accuracy = 0.0
+    
     print("모델 학습을 시작합니다...")
-    for epoch in range(epochs):
+    for epoch in range(config.epochs):
         model.train()
-        # ... (이하 학습 로직은 이전과 동일) ...
-        running_loss = 0.0
+        train_loss = 0.0
         for inputs, labels in train_loader:
             inputs, labels = inputs.to(device), labels.to(device)
             optimizer.zero_grad()
@@ -146,14 +103,11 @@ def train_model(model, train_loader, val_loader, epochs=100, model_name="best_mo
             loss = criterion(outputs, labels)
             loss.backward()
             optimizer.step()
-            running_loss += loss.item()
-        
-        # 검증 로직 (이전과 동일)
+            train_loss += loss.item()
+        train_loss /= len(train_loader)
+
         model.eval()
-        # ... (이하 검증 로직은 이전과 동일) ...
-        val_loss = 0.0
-        correct = 0
-        total = 0
+        val_loss = 0.0; correct = 0; total = 0
         with torch.no_grad():
             for inputs, labels in val_loader:
                 inputs, labels = inputs.to(device), labels.to(device)
@@ -164,37 +118,26 @@ def train_model(model, train_loader, val_loader, epochs=100, model_name="best_mo
                 total += labels.size(0)
                 correct += (predicted == labels).sum().item()
         
+        val_loss /= len(val_loader)
         accuracy = 100 * correct / total
-        print(f"에포크 [{epoch+1}/{epochs}], 학습 손실: {running_loss/len(train_loader):.4f}, 검증 정확도: {accuracy:.2f}%")
+        print(f"에포크 [{epoch+1}/{config.epochs}], 학습 손실: {train_loss:.4f}, 검증 손실: {val_loss:.4f}, 검증 정확도: {accuracy:.2f}%")
 
+        # [WANDB] 매 에포크마다 측정 지표를 wandb에 기록
         wandb.log({
             "epoch": epoch + 1,
-            "train_loss": running_loss/len(train_loader),
+            "train_loss": train_loss,
             "val_loss": val_loss,
             "accuracy": accuracy
         })
-        # --- 모델 저장 로직 (두 가지 방식 모두 사용) ---
 
-        # 1. 최고 성능 모델 저장 (기존 방식)
         if accuracy > best_val_accuracy:
             best_val_accuracy = accuracy
-            torch.save(model.state_dict(), model_name)
-            print(f"★★ 최고 정확도 경신({accuracy:.2f}%)! 모델을 '{model_name}'으로 저장합니다. ★★")
-            
-        # 2. 20 에포크마다 주기적으로 체크포인트 저장 (새로 추가된 기능)
-        # (epoch + 1)이 20의 배수이거나, 마지막 에포크일 경우 저장
-        if (epoch + 1) % 20 == 0 or (epoch + 1) == epochs:
-            checkpoint_path = f"checkpoint_epoch_{epoch+1}.pt"
-            torch.save({
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'accuracy': accuracy,
-            }, checkpoint_path)
-            print(f"== 에포크 {epoch+1} 체크포인트를 '{checkpoint_path}'에 저장했습니다. ==")
-
-
+            # 모델을 로컬에 임시 저장
+            torch.save(model.state_dict(), "best_model.pt")
+            print(f"★★ 최고 정확도 경신({accuracy:.2f}%)! 모델을 임시 저장합니다. ★★")
+    
     print(f"학습 완료. 최고 검증 정확도: {best_val_accuracy:.2f}%")
+    
     # [WANDB] 최고 성능 모델을 Artifact로 저장
     best_model_artifact = wandb.Artifact(
         name="best_brain_tumor_model",
@@ -205,7 +148,6 @@ def train_model(model, train_loader, val_loader, epochs=100, model_name="best_mo
     best_model_artifact.add_file("best_model.pt")
     wandb.run.log_artifact(best_model_artifact)
     print("최고 성능 모델을 wandb Artifact로 저장했습니다.")
-    return model
 
 
 
@@ -250,13 +192,62 @@ def visualize_result(img_tensor, cam, predicted_class, actual_class):
     axs[2].imshow(superimposed_img); axs[2].set_title('Superimposed Image'); axs[2].axis('off')
     plt.show()
 
+# 3. 데이터 변환(Transforms) 정의
+IMG_SIZE = 224
+IMG_MEAN = [0.485, 0.456, 0.406]
+IMG_STD = [0.229, 0.224, 0.225]
 
+train_transforms = transforms.Compose([
+    transforms.Resize((IMG_SIZE, IMG_SIZE)),
+    transforms.RandomHorizontalFlip(p=0.5), # 좌우 반전
+    transforms.RandomRotation(degrees=20),    # 회전 각도 늘리기
+    transforms.RandomAffine(degrees=0, translate=(0.1, 0.1)), # 이미지 일부 이동
+    transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3), # 색상 변화 더 주기
+    transforms.ToTensor(),
+    transforms.Normalize(mean=IMG_MEAN, std=IMG_STD)
+])
+
+val_transforms = transforms.Compose([
+    transforms.Resize((IMG_SIZE, IMG_SIZE)),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=IMG_MEAN, std=IMG_STD)
+])
+
+#4. 데이터 준비
+full_dataset = datasets.ImageFolder(root=data_dir, transform=train_transforms)
+class_names = full_dataset.classes
+print(f"발견된 클래스: {class_names}")
+
+train_size = int(0.8 * len(full_dataset))
+val_size = len(full_dataset) - train_size
+train_dataset, val_dataset = random_split(full_dataset, [train_size, val_size])
+val_dataset.dataset.transform = val_transforms # 검증셋에는 데이터 증강 없는 transform 적용
+
+print(f"총 데이터: {len(full_dataset)}개, 학습 데이터: {len(train_dataset)}개, 검증 데이터: {len(val_dataset)}개")
+
+
+# 6. 전체 로직 실행
+# [WANDB] 실험 초기화 및 설정
+wandb.init(
+    entity="0311ben-kwangwoon-university",
+    project="brain-tumor-classification-attention", # wandb 프로젝트 이름
+    
+    # 하이퍼파라미터 설정
+    config={
+        "learning_rate": 0.001,
+        "epochs": 1000, # 테스트를 위해 에포크 줄임. 실제로는 30 이상 권장
+        "batch_size": 128,
+        "architecture": "AttentionCNN",
+        "dataset": "Brain Tumor MRI (3 classes)",
+        "image_size": IMG_SIZE,
+    }
+)
 # [WANDB] config 객체를 통해 하이퍼파라미터 접근
 config = wandb.config
 
 # DataLoader 생성
-train_loader = DataLoader(train_dataset, batch_size=config.batch_size, shuffle=True, num_workers=2)
-val_loader = DataLoader(val_dataset, batch_size=config.batch_size, shuffle=False, num_workers=2)
+train_loader = DataLoader(train_dataset, batch_size=config.batch_size, shuffle=True, num_workers=14)
+val_loader = DataLoader(val_dataset, batch_size=config.batch_size, shuffle=False, num_workers=14)
 
 # 모델 생성 및 학습
 model = AttentionCNN(num_classes=len(class_names))
