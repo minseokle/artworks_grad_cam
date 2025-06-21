@@ -5,8 +5,10 @@ from torchvision import transforms
 from skimage.transform import resize
 import cv2
 
+from attention_model import *
+
 class GradCAM:
-    def __init__(self, model:nn.Module, target_layer):
+    def __init__(self, model:nn.Module, target_layer:CBAM):
         self.model = model
         self.target_layer = target_layer
         self.feature_maps = None
@@ -14,7 +16,11 @@ class GradCAM:
         
         self.target_layer.register_forward_hook(self.save_feature_maps)
         self.target_layer.register_full_backward_hook(self.save_gradients)
-        
+    def save_feature_maps(self, module, input, output): 
+        self.feature_maps = output.detach()
+    def save_gradients(self, module, grad_in, grad_out): 
+        self.gradients = grad_out[0].detach()
+       
     def __call__(self, x:torch.Tensor, index=None):
         self.model.eval()
         output:torch.Tensor = self.model(x)
@@ -41,7 +47,8 @@ def image_to_res(model:nn.Module,image:np.ndarray|torch.Tensor,img_mean:list[flo
     input_tensor = image.to(device)
     model.eval() # 모델을 평가 모드로
     with torch.no_grad():
-        outputs = model(input_tensor); _, predicted_idx_tensor = torch.max(outputs, 1)
+        outputs = model(input_tensor)
+        _, predicted_idx_tensor = torch.max(outputs, 1)
         predicted_idx = predicted_idx_tensor.item()
     
     target_layer = model.features[-2]
