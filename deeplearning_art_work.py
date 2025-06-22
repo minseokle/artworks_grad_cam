@@ -19,7 +19,7 @@ from datetime import datetime
 import wandb # [WANDB] wandb 임포트
 import kagglehub
 
-from attention_model import AttentionCNN
+from attention_model import AttentionCNN,ResNet18_CBAM,ResNet34_CBAM
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 
@@ -48,7 +48,7 @@ def train_model(model:torch.nn.Module, train_loader:DataLoader, val_loader:DataL
 
     best_val_accuracy = 0.0
     
-    # patience=3: 3 에포크 동안 val_loss 개선이 없으면 학습률을 0.1배로 줄임
+    # patience=3: 3 에포크 동안 val_loss 개선이 없으면 학습률을 0.5배로 줄임
     scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=10)
 
     # --- [TQDM NESTED] 외부 프로그레스 바: 전체 에포크 용 ---
@@ -108,6 +108,7 @@ def train_model(model:torch.nn.Module, train_loader:DataLoader, val_loader:DataL
             best_val_loss = val_loss
             torch.save(model.state_dict(), model_name)
             patience_counter = 0
+            best_val_accuracy = accuracy
         else:
             patience_counter += 1
             if patience_counter >= patience:
@@ -323,10 +324,10 @@ if __name__ == '__main__':
 
     # [WANDB] 하이퍼파라미터를 딕셔너리로 먼저 정의
     config_dict = {
-        "learning_rate": 0.001,
+        "learning_rate": 0.0001,
         "epochs": 1000,
-        "batch_size": 128,
-        "architecture": "AttentionCNN_Grayscale", # 모델 이름 변경
+        "batch_size": 32,
+        "architecture": "ResNet34_CBAM", # 모델 이름 변경
         "dataset": kaggle_dir,
         "image_size": IMG_SIZE,
     }
@@ -354,7 +355,7 @@ if __name__ == '__main__':
     best_model_dir=os.path.join(CURRENT_FOLDER,run_name+'best_model.pt')
 
     # 모델 생성 및 학습
-    model = AttentionCNN(num_classes=len(class_names))
+    model = ResNet34_CBAM(num_classes=len(class_names))
     model = train_model(model, train_loader, val_loader, config,best_model_dir)
 
     print("\n--- 검증 데이터셋의 샘플에 대한 결과 시각화 및 wandb 로깅 ---")
@@ -373,7 +374,8 @@ if __name__ == '__main__':
             outputs = model(input_tensor); _, predicted_idx_tensor = torch.max(outputs, 1)
             predicted_idx = predicted_idx_tensor.item(); predicted_class_name = class_names[predicted_idx]
         
-        target_layer = model.features[-2]
+        # target_layer = model.features[-2]
+        target_layer = model.layer4[-1] 
         grad_cam = GradCAM(model, target_layer)
         cam = grad_cam(input_tensor, index=predicted_idx_tensor)
         
